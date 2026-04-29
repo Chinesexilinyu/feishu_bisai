@@ -1,0 +1,24 @@
+doc-assistant:
+  name: 飞书文档助手Agent
+  role: coordinator
+  capabilities:
+    - doc:*
+    - delegate:*
+    - feishu:doc:read
+    - feishu:doc:write
+
+data-agent:
+  name: 企业数据Agent
+  role: data_access
+  capabilities:
+    - feishu:bitable:read
+    - feishu:bitable:write
+    - feishu:contact:read
+    - feishu:calendar:read
+
+web-agent:
+  name: 外部检索Agent
+  role: web_search
+  capabilities:
+    - web:search
+    - web:scrape

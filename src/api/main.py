@@ -1,9 +1,22 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+import yaml
+import os
 from src.agents.doc_agent import DocAgent
 from src.agents.web_agent import WebAgent
 from src.audit_service.query import AuditQuery
 from src.llm import get_llm_client
+
+# 加载服务配置
+def load_server_config():
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config", "secrets.yaml")
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+        return config.get("server", {})
+
+server_config = load_server_config()
+HOST = server_config.get("host", "0.0.0.0")
+PORT = server_config.get("port", 8000)
 
 app = FastAPI(title="Agent身份与权限系统", version="1.0.0")
 
@@ -90,4 +103,4 @@ async def get_denied_events():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=HOST, port=PORT)

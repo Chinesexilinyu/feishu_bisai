@@ -79,23 +79,30 @@ class DocAgent(BaseAgent):
             report_content += "| 书籍ID | 书籍名称 | 作者 | 类型 | 上榜次数 | 累计人气值 |\n"
             report_content += "|--------|----------|------|------|----------|------------|\n"
             
+            # 从record中提取值的辅助函数，兼容新旧两种字段名格式
+            def _field(record, *keys):
+                for k in keys:
+                    if k in record:
+                        val = record[k]
+                        if isinstance(val, dict) and "value" in val:
+                            v = val["value"]
+                            if isinstance(v, list) and len(v) > 0:
+                                if isinstance(v[0], dict) and "text" in v[0]:
+                                    return v[0]["text"]
+                                return str(v[0])
+                            return str(v)
+                        return str(val)
+                return ""
+            
             # 解析热榜书籍数据
             if "recordMap" in internal_data:
-                type_map = {
-                    "optrhpyC88": "都市",
-                    "opt4HKz0pD": "玄幻",
-                    "optI5HhU9S": "言情",
-                    "optilNdf3P": "科幻",
-                    "optek2WpKh": "悬疑",
-                    "optvcYlePa": "其他"
-                }
                 for record in internal_data["recordMap"].values():
-                    book_id = record["fldZgyQUic"]["value"][0]["text"] if "fldZgyQUic" in record else ""
-                    book_name = record["fldsRbvAwB"]["value"][0]["text"] if "fldsRbvAwB" in record else ""
-                    author = record["fldVCpfYUs"]["value"][0]["text"] if "fldVCpfYUs" in record else ""
-                    book_type = type_map.get(record["fldPzg2k5U"]["value"], "未知") if "fldPzg2k5U" in record else "未知"
-                    rank_count = record["fldNMWkbIT"]["value"] if "fldNMWkbIT" in record else 0
-                    popularity = record["fldoLJfFrD"]["value"] if "fldoLJfFrD" in record else 0
+                    book_id = _field(record, "fldZgyQUic", "书籍ID")
+                    book_name = _field(record, "fldsRbvAwB", "书籍名称")
+                    author = _field(record, "fldVCpfYUs", "作者", "作者名称")
+                    book_type = _field(record, "fldPzg2k5U", "书籍类型", "类型")
+                    rank_count = _field(record, "fldNMWkbIT", "上榜次数")
+                    popularity = _field(record, "fldoLJfFrD", "累计人气值", "人气值")
                     report_content += f"| {book_id} | {book_name} | {author} | {book_type} | {rank_count} | {popularity} |\n"
 
             # 添加网络搜索结果

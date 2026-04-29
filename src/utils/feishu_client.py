@@ -2,207 +2,225 @@ import yaml
 import os
 import time
 import requests
-import lark_oapi as lark
-from lark_oapi.api.docx.v1 import CreateDocumentRequest, CreateDocumentRequestBody
+from urllib.parse import urlparse
 
 class FeishuClient:
-    def __init__(self):
+    _instance = None
+    _initialized = False
+    
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self, table_name: str = "default"):
+        if FeishuClient._initialized:
+            return
+        
+        # 加载配置文件获取 app_id 和 app_secret
         secrets_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             "config", "secrets.yaml"
         )
         with open(secrets_path, 'r', encoding='utf-8') as f:
             secrets = yaml.safe_load(f)
-            self.app_id = secrets["feishu"]["app_id"]
-            self.app_secret = secrets["feishu"]["app_secret"]
-            self.wiki_block_id = secrets["feishu"].get("wiki_block_id", "blk6XVlzM2xVXHzl")
-            self.bitable_app_token = secrets["feishu"].get("bitable_app_token")
-            self.bitable_table_id = secrets["feishu"].get("bitable_table_id")
+            feishu_secrets = secrets.get("feishu", {})
+            self.app_id = feishu_secrets.get("app_id", "")
+            self.app_secret = feishu_secrets.get("app_secret", "")
+            self.target_url = feishu_secrets.get("target_feishu_url", 
+                "https://jcneyh7qlo8i.feishu.cn/wiki/CRunwszdyizFEmkit1Xc1tsGnLd?table=blk6XVlzM2xVXHzl")
         
-        # 严格校验配置，无配置直接抛出错误
-        self.use_mock = secrets["feishu"].get("use_mock", False)
-        if not self.use_mock and (not self.app_id or not self.app_secret):
-            raise Exception("请配置config/secrets.yaml中的飞书app_id和app_secret，或设置use_mock: true启用模拟模式")
+        if not self.app_id or not self.app_secret:
+            raise Exception("请配置config/secrets.yaml中的飞书app_id和app_secret")
         
-        # 初始化飞书客户端
-        self.client = lark.Client.builder() \
-            .app_id(self.app_id) \
-            .app_secret(self.app_secret) \
-            .log_level(lark.LogLevel.INFO) \
-            .build()
-
-    def get_bitable_records(self) -> dict:
-        """读取多维表格数据，优先使用Wiki嵌入表格，失败或mock模式返回模拟数据"""
-        # Mock模式直接返回模拟数据
-        if self.use_mock:
-            return self._get_mock_table_records()
+        # 自动解析真实的 bitable app_token 和 table_id
+        self.bitable_app_token = None
+        self.bitable_table_id = None
+        self._resolve_bitable_params()
         
-        try:
-            # 如果配置了wiki_block_id，优先读取Wiki嵌入表格
-            if self.wiki_block_id:
-                return self._get_wiki_table_records()
-            
-            # 否则读取独立多维表格
-            from lark_oapi.api.bitable.v1 import ListAppTableRecordRequest
-            if not self.bitable_app_token or not self.bitable_table_id:
-                raise Exception("请配置config/secrets.yaml中的多维表格bitable_app_token和bitable_table_id或wiki_block_id")
-            
-            request = ListAppTableRecordRequest.builder() \
-                .app_token(self.bitable_app_token) \
-                .table_id(self.bitable_table_id) \
-                .page_size(500) \
-                .build()
-            
-            response = self.client.bitable.v1.app_table_record.list(request)
-            if not response.success():
-                req_id = getattr(response, 'request_id', getattr(response, 'req_id', 'unknown'))
-                raise Exception(f"读取多维表格失败: {response.code}, {response.msg}, request_id={req_id}")
-            return response.data.dict()
-        except Exception as e:
-            # 调用失败降级到模拟数据，保证流程可运行
-            print(f"[WARNING] 读取真实飞书数据失败，降级到模拟数据: {str(e)}")
-            return self._get_mock_table_records()
-
-    def _get_mock_table_records(self) -> dict:
-        """返回模拟的番茄小说表格数据，格式和真实接口一致"""
-        return {
-            "recordMap": {
-                "rec1": {
-                    "fldZgyQUic": {"value": [{"text": "B001"}]},
-                    "fldsRbvAwB": {"value": [{"text": "都市风云"}]},
-                    "fldVCpfYUs": {"value": [{"text": "张三"}]},
-                    "fldPzg2k5U": {"value": "optrhpyC88"},
-                    "fldNMWkbIT": {"value": 5},
-                    "fldoLJfFrD": {"value": 120000}
-                },
-                "rec2": {
-                    "fldZgyQUic": {"value": [{"text": "B002"}]},
-                    "fldsRbvAwB": {"value": [{"text": "玄幻修仙传"}]},
-                    "fldVCpfYUs": {"value": [{"text": "李四"}]},
-                    "fldPzg2k5U": {"value": "opt4HKz0pD"},
-                    "fldNMWkbIT": {"value": 8},
-                    "fldoLJfFrD": {"value": 180000}
-                },
-                "rec3": {
-                    "fldZgyQUic": {"value": [{"text": "B003"}]},
-                    "fldsRbvAwB": {"value": [{"text": "爱情故事集"}]},
-                    "fldVCpfYUs": {"value": [{"text": "王五"}]},
-                    "fldPzg2k5U": {"value": "optI5HhU9S"},
-                    "fldNMWkbIT": {"value": 3},
-                    "fldoLJfFrD": {"value": 90000}
-                },
-                "rec4": {
-                    "fldZgyQUic": {"value": [{"text": "B004"}]},
-                    "fldsRbvAwB": {"value": [{"text": "星际漫游"}]},
-                    "fldVCpfYUs": {"value": [{"text": "赵六"}]},
-                    "fldPzg2k5U": {"value": "optilNdf3P"},
-                    "fldNMWkbIT": {"value": 6},
-                    "fldoLJfFrD": {"value": 150000}
-                }
-            }
-        }
-
-    def _get_wiki_table_records(self) -> dict:
-        """读取Wiki嵌入的表格数据，兼容原有返回格式（直接调用HTTP接口避免SDK导入问题）"""
-        # 1. 获取tenant_access_token
+        self.current_table = table_name
+        FeishuClient._initialized = True
+    
+    def _resolve_bitable_params(self):
+        """从飞书链接自动解析多维表格的真实 app_token 和 table_id"""
+        # 从 URL 提取 document_id 和 block_id
+        parsed = urlparse(self.target_url)
+        path_parts = parsed.path.split("/")
+        document_id = path_parts[-1].split("?")[0] if path_parts else ""
+        
+        from urllib.parse import parse_qs
+        query_params = parse_qs(parsed.query)
+        block_id = query_params.get("table", [""])[0]
+        
+        print(f"[INFO] 解析飞书链接: document_id={document_id}, block_id={block_id}")
+        
+        # 使用飞书 SDK 获取 tenant_access_token
         token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-        token_data = {
-            "app_id": self.app_id,
-            "app_secret": self.app_secret
-        }
-        try:
-            token_resp = requests.post(token_url, json=token_data, timeout=10)
-            token_resp.raise_for_status()
-            token_json = token_resp.json()
-        except Exception as e:
-            raise Exception(f"获取Access Token失败: {str(e)}, 原始响应: {getattr(token_resp, 'text', '无响应')}")
+        token_payload = {"app_id": self.app_id, "app_secret": self.app_secret}
+        token_resp = requests.post(token_url, json=token_payload, timeout=10)
+        if token_resp.json().get("code") != 0:
+            raise Exception(f"获取Token失败: {token_resp.json().get('msg')}")
+        access_token = token_resp.json()["tenant_access_token"]
+        headers = {"Authorization": f"Bearer {access_token}"}
         
-        if token_json.get("code") != 0:
-            raise Exception(f"获取Access Token失败: {token_json.get('msg')}, 错误码: {token_json.get('code')}")
-        access_token = token_json["tenant_access_token"]
-
-        # 2. 调用Wiki API获取块数据
-        block_url = f"https://open.feishu.cn/open-apis/wiki/v2/blocks/{self.wiki_block_id}"
-        headers = {
-            "Authorization": f"Bearer {access_token}"
-        }
-        try:
-            block_resp = requests.get(block_url, headers=headers, timeout=10)
-            print(f"[DEBUG] Wiki API状态码: {block_resp.status_code}")
-            print(f"[DEBUG] Wiki API响应头: {dict(block_resp.headers)}")
-            print(f"[DEBUG] Wiki API原始响应内容: {block_resp.text[:1000]}")  # 打印前1000字符
-            block_resp.raise_for_status()
+        # 步骤1：尝试用 Wiki API 获取节点信息
+        wiki_url = f"https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token={document_id}"
+        resp = requests.get(wiki_url, headers=headers, timeout=10)
+        resp_json = resp.json()
+        
+        space_id = None
+        if resp_json.get("code") == 0:
+            node_data = resp_json["data"]["node"]
+            space_id = node_data.get("space_id", "")
+            obj_token = node_data.get("obj_token", "")
+            obj_type = node_data.get("obj_type", "")
+            print(f"[INFO] Wiki节点: space_id={space_id}, obj_type={obj_type}, obj_token={obj_token}")
+            document_id = obj_token  # 真实文档 token
             
-            try:
-                block_json = block_resp.json()
-            except Exception as e:
-                raise Exception(f"JSON解析失败，原始响应不是JSON格式: {str(e)}, 响应内容: {block_resp.text[:2000]}")
-        except Exception as e:
-            raise Exception(f"请求Wiki API失败: {str(e)}")
+            if obj_type == "bitable":
+                # 多维表格本身
+                self.bitable_app_token = obj_token
+                print(f"[INFO] 找到独立多维表格: app_token={obj_token}")
         
-        if block_json.get("code") != 0:
-            raise Exception(f"读取Wiki表格失败: {block_json.get('code')}, {block_json.get('msg')}, request_id={block_json.get('request_id', 'unknown')}")
+        if not space_id:
+            raise Exception("无法获取Wiki空间信息，请确认应用已开通 wiki:space:readonly 权限")
         
-        block_data = block_json["data"]["block"]
-        if block_data["block_type"] != 18:  # 18是表格类型
-            raise Exception("该Wiki块不是表格类型，无法读取")
+        # 步骤2：获取文档块列表，找到 bitable 块
+        if not self.bitable_app_token:
+            blocks_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks?page_size=500"
+            resp = requests.get(blocks_url, headers=headers, timeout=10)
+            resp_json = resp.json()
+            
+            if resp_json.get("code") == 0:
+                blocks = resp_json["data"]["items"]
+                for block in blocks:
+                    block_type = block.get("block_type")
+                    if block_type == 19:  # bitable 类型
+                        self.bitable_app_token = block["bitable"]["token"]
+                        print(f"[INFO] 找到内嵌多维表格: app_token={self.bitable_app_token}")
+                        break
+                if not self.bitable_app_token:
+                    raise Exception("未在文档中找到内嵌多维表格，请确认链接中存在多维表格")
+            else:
+                print(f"[WARN] 获取文档块列表失败: {resp_json.get('msg')}")
+                # 尝试直接用 document_id 作为 app_token
+                self.bitable_app_token = document_id
+                print(f"[INFO] 尝试使用 document_id 作为 app_token: {self.bitable_app_token}")
         
-        # 解析表格数据，转换为和多维表格兼容的recordMap格式
-        table = block_data["table"]
-        rows = table["table_rows"]
-        columns = table["table_columns"]
-        record_map = {}
+        # 步骤3：获取表格列表，取第一个默认表格
+        tables_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.bitable_app_token}/tables?page_size=100"
+        resp = requests.get(tables_url, headers=headers, timeout=10)
+        resp_json = resp.json()
         
-        # 字段映射（适配原来的字段ID）
-        field_map = {
-            "书籍ID": "fldZgyQUic",
-            "书籍名称": "fldsRbvAwB",
-            "作者名称": "fldVCpfYUs",
-            "书籍类型": "fldPzg2k5U",
-            "上榜次数": "fldNMWkbIT",
-            "累计人气值": "fldoLJfFrD",
-            "创建时间": "fld0ip5Am5"
-        }
-        type_map = {
-            "都市": "optrhpyC88",
-            "玄幻": "opt4HKz0pD",
-            "言情": "optI5HhU9S",
-            "科幻": "optilNdf3P",
-            "悬疑": "optek2WpKh",
-            "其他": "optvcYlePa"
-        }
+        if resp_json.get("code") == 0 and resp_json["data"]["items"]:
+            tables = resp_json["data"]["items"]
+            self.bitable_table_id = tables[0]["table_id"]
+            print(f"[INFO] 获取到表格: {tables[0]['name']}, table_id={self.bitable_table_id}")
+        else:
+            # 如果获取表格失败，尝试用 block_id 转换 table_id
+            # block_id 格式为 blkXXX，table_id 格式为 tblXXX
+            if block_id.startswith("blk"):
+                self.bitable_table_id = "tbl" + block_id[3:]
+                print(f"[INFO] block_id转table_id: {self.bitable_table_id}")
+            else:
+                self.bitable_table_id = block_id
+        
+        print(f"[SUCCESS] 解析完成！app_token={self.bitable_app_token}, table_id={self.bitable_table_id}")
 
-        for row_idx, row in enumerate(rows[1:], start=1):  # 第一行是表头
-            record_id = f"rec{row_idx}"
-            record = {}
-            for col_idx, cell in enumerate(row["cells"]):
-                col_name = columns[col_idx]["table_column_name"]
-                field_id = field_map.get(col_name, f"fld_{col_idx}")
-                value = cell["value"]
-                if col_name == "书籍类型":
-                    value = type_map.get(value, "optvcYlePa")
-                elif col_name in ["上榜次数", "累计人气值"]:
-                    value = int(value) if value.isdigit() else 0
-                
-                record[field_id] = {
-                    "value": [{"text": value}] if isinstance(value, str) else value,
-                    "modifiedTime": int(time.time())
-                }
-            record_map[record_id] = record
-        
-        return {"recordMap": record_map}
+    def switch_table(self, table_name: str = "default") -> None:
+        self.current_table = table_name
+    
+    def _get_tenant_access_token(self) -> str:
+        token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        token_payload = {"app_id": self.app_id, "app_secret": self.app_secret}
+        token_resp = requests.post(token_url, json=token_payload, timeout=10)
+        return token_resp.json()["tenant_access_token"]
+
+    def get_bitable_records(self, table_name: str = None) -> dict:
+        """读取多维表格数据，使用 bitable API"""
+        try:
+            access_token = self._get_tenant_access_token()
+            headers = {"Authorization": f"Bearer {access_token}"}
+            
+            # 使用 bitable API 读取记录
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.bitable_app_token}/tables/{self.bitable_table_id}/records?page_size=500"
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp_json = resp.json()
+            
+            if resp_json.get("code") != 0:
+                raise Exception(f"bitable API 返回错误: {resp_json.get('msg')}, 错误码={resp_json.get('code')}")
+            
+            items = resp_json["data"]["items"]
+            
+            # 转换为系统兼容格式
+            record_map = {}
+            for item in items:
+                record_id = item["record_id"]
+                fields = item["fields"]
+                record = {}
+                for field_name, field_value in fields.items():
+                    if isinstance(field_value, list):
+                        display_text = str(field_value[0].get("text", field_value[0]) if isinstance(field_value[0], dict) else field_value[0])
+                        record[field_name] = {"value": [{"text": display_text}]}
+                    elif isinstance(field_value, dict):
+                        record[field_name] = {"value": [{"text": str(field_value)}]}
+                    elif isinstance(field_value, (int, float)):
+                        record[field_name] = {"value": field_value}
+                    else:
+                        record[field_name] = {"value": [{"text": str(field_value)}]}
+                record_map[record_id] = record
+            
+            print(f"[SUCCESS] 成功从飞书多维表格读取 {len(record_map)} 条记录")
+            return {"recordMap": record_map}
+            
+        except Exception as e:
+            raise Exception(f"读取多维表格失败: {str(e)}")
 
     def create_doc(self, title: str, content: str) -> str:
-        """创建飞书文档"""
-        request = CreateDocumentRequest.builder() \
-            .request_body(CreateDocumentRequestBody.builder()
-                .title(title)
-                .content(content)
-                .build()) \
-            .build()
+        """创建飞书文档 - 先创建空文档，再添加内容块"""
+        url = "https://open.feishu.cn/open-apis/docx/v1/documents"
+        headers = {
+            "Authorization": f"Bearer {self._get_tenant_access_token()}",
+            "Content-Type": "application/json"
+        }
         
-        response = self.client.docx.v1.document.create(request)
-        if not response.success():
-            req_id = getattr(response, 'request_id', getattr(response, 'req_id', 'unknown'))
-            raise Exception(f"创建文档失败: {response.code}, {response.msg}, request_id={req_id}")
-        return f"https://feishu.cn/docx/{response.data.document.document_id}"
+        # 步骤1：创建文档（只支持 title 参数）
+        body = {"title": title}
+        resp = requests.post(url, headers=headers, json=body, timeout=10)
+        resp_json = resp.json()
+        
+        if resp_json.get("code") != 0:
+            raise Exception(f"创建文档失败: {resp_json.get('msg')}, 错误码={resp_json.get('code')}")
+        
+        document_id = resp_json["data"]["document"]["document_id"]
+        revision_id = resp_json["data"]["document"]["revision_id"]
+        print(f"[INFO] 文档创建成功, document_id={document_id}")
+        
+        # 步骤2：添加内容块
+        blocks_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children"
+        blocks_body = {
+            "children": [],
+            "index": 0,
+            "location": "start"
+        }
+        
+        # 把内容按段落分割成文本块
+        lines = content.strip().split("\n")
+        for line in lines:
+            if line.strip():
+                block = {
+                    "block_type": 2,  # 2 = 文本
+                    "text": {
+                        "elements": [{"text_run": {"content": line}}],
+                        "style": {}
+                    }
+                }
+                blocks_body["children"].append(block)
+        
+        if blocks_body["children"]:
+            resp = requests.post(blocks_url, headers=headers, json=blocks_body, timeout=30)
+            resp_json = resp.json()
+            if resp_json.get("code") != 0:
+                print(f"[WARN] 添加文档内容失败: {resp_json.get('msg')}, 文档已创建但内容为空")
+        
+        return f"https://feishu.cn/docx/{document_id}"

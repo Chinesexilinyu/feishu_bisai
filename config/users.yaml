@@ -1,0 +1,11 @@
+user-001:
+  name: 张三
+  role: admin
+  permissions:
+    - feishu:doc:read
+    - feishu:doc:write
+    - feishu:bitable:read
+    - feishu:bitable:write
+    - feishu:contact:read
+    - feishu:calendar:read
+    - web:search
