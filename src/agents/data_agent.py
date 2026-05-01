@@ -60,7 +60,7 @@ class DataAgent(BaseAgent):
         # 执行操作
         try:
             if resource == "feishu:bitable" and action == "read":
-                data = self.feishu_client.get_bitable_records()
+                data = self.feishu_client.get_all_table_records()
                 return {"success": True, "data": data, "code": 200}
             else:
                 return {"success": False, "error": "UNSUPPORTED_OPERATION", "code": 400}

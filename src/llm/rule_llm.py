@@ -33,7 +33,7 @@ class RuleLLM(BaseLLM):
                 break
         
         # 检测是否需要网络搜索
-        if any(word in words for word in ["搜索", "查询", "找", "网络", "公开", "热度", "评论", "口碑", "外网"]):
+        if any(word in words for word in ["搜索", "查询", "找", "网络", "公开", "热度", "评论", "口碑", "外网", "检索", "外部", "知识", "结合"]):
             result["need_web_search"] = True
         
         # 检测是否越权测试

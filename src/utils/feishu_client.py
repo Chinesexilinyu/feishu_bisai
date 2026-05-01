@@ -36,9 +36,9 @@ class FeishuClient:
         # 自动解析真实的 bitable app_token 和 table_id
         self.bitable_app_token = None
         self.bitable_table_id = None
+        self.all_tables = {}  # {table_name: {"table_id": ..., "fields": [...]}}
         self._resolve_bitable_params()
         
-        self.current_table = table_name
         FeishuClient._initialized = True
     
     def _resolve_bitable_params(self):
@@ -107,7 +107,7 @@ class FeishuClient:
                 self.bitable_app_token = document_id
                 print(f"[INFO] 尝试使用 document_id 作为 app_token: {self.bitable_app_token}")
         
-        # 步骤3：获取表格列表，取第一个默认表格
+        # 步骤3：获取表格列表，存储全部表格
         tables_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.bitable_app_token}/tables?page_size=100"
         resp = requests.get(tables_url, headers=headers, timeout=10)
         resp_json = resp.json()
@@ -115,20 +115,100 @@ class FeishuClient:
         if resp_json.get("code") == 0 and resp_json["data"]["items"]:
             tables = resp_json["data"]["items"]
             self.bitable_table_id = tables[0]["table_id"]
-            print(f"[INFO] 获取到表格: {tables[0]['name']}, table_id={self.bitable_table_id}")
+            for t in tables:
+                self.all_tables[t["name"]] = {"table_id": t["table_id"], "fields": []}
+                print(f"[INFO] 获取到表格: {t['name']}, table_id={t['table_id']}")
+            
+            # 步骤4：获取每个表的字段元数据（field name → Chinese label）
+            for table_name, table_info in self.all_tables.items():
+                tbl_id = table_info["table_id"]
+                fields_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.bitable_app_token}/tables/{tbl_id}/fields?page_size=100"
+                fields_resp = requests.get(fields_url, headers=headers, timeout=10)
+                fields_json = fields_resp.json()
+                if fields_json.get("code") == 0:
+                    for f in fields_json["data"]["items"]:
+                        table_info["fields"].append({
+                            "field_name": f["field_name"],
+                            "field_label": f.get("field_name", ""),  # fallback
+                        })
+                    field_names = [f["field_name"] for f in table_info["fields"]]
+                    print(f"[INFO]   表格[{table_name}]字段: {field_names}")
+                else:
+                    print(f"[WARN]   表格[{table_name}]字段获取失败: {fields_json.get('msg')}")
         else:
-            # 如果获取表格失败，尝试用 block_id 转换 table_id
-            # block_id 格式为 blkXXX，table_id 格式为 tblXXX
             if block_id.startswith("blk"):
                 self.bitable_table_id = "tbl" + block_id[3:]
+                self.all_tables["default"] = {"table_id": self.bitable_table_id, "fields": []}
                 print(f"[INFO] block_id转table_id: {self.bitable_table_id}")
             else:
                 self.bitable_table_id = block_id
+                self.all_tables["default"] = {"table_id": self.bitable_table_id, "fields": []}
         
         print(f"[SUCCESS] 解析完成！app_token={self.bitable_app_token}, table_id={self.bitable_table_id}")
 
     def switch_table(self, table_name: str = "default") -> None:
         self.current_table = table_name
+
+    def get_table_names(self) -> list:
+        """获取所有表格名称列表"""
+        return list(self.all_tables.keys())
+
+    def get_all_table_records(self) -> dict:
+        """读取所有多维表格的全部记录，返回 {table_name: {records, fields, row_count}}"""
+        try:
+            access_token = self._get_tenant_access_token()
+            headers = {"Authorization": f"Bearer {access_token}"}
+            all_data = {}
+            
+            for table_name, table_info in self.all_tables.items():
+                tbl_id = table_info["table_id"]
+                url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.bitable_app_token}/tables/{tbl_id}/records?page_size=500"
+                resp = requests.get(url, headers=headers, timeout=15)
+                resp_json = resp.json()
+                
+                if resp_json.get("code") != 0:
+                    print(f"[WARN] 表格[{table_name}]读取失败: {resp_json.get('msg')}")
+                    continue
+                
+                items = resp_json.get("data", {}).get("items", [])
+                records = []
+                for item in items:
+                    fields = item.get("fields", {})
+                    flat_record = {}
+                    for field_name, field_value in fields.items():
+                        if isinstance(field_value, list) and len(field_value) > 0:
+                            elem = field_value[0]
+                            if isinstance(elem, dict):
+                                flat_record[field_name] = elem.get("text", str(elem))
+                            else:
+                                flat_record[field_name] = str(elem)
+                        elif isinstance(field_value, (int, float)):
+                            flat_record[field_name] = field_value
+                        elif isinstance(field_value, str):
+                            flat_record[field_name] = field_value
+                        elif field_value is None:
+                            flat_record[field_name] = ""
+                        else:
+                            flat_record[field_name] = str(field_value)
+                    records.append(flat_record)
+                
+                all_data[table_name] = {
+                    "records": records,
+                    "row_count": len(records),
+                    "fields": [f["field_name"] for f in table_info.get("fields", [])],
+                    "table_id": tbl_id
+                }
+                print(f"[SUCCESS] 表格[{table_name}]: 读取 {len(records)} 条记录")
+            
+            # 汇总info
+            total_rows = sum(v["row_count"] for v in all_data.values())
+            table_summary = ", ".join(f"{k}({v['row_count']}行)" for k, v in all_data.items())
+            print(f"[SUCCESS] 全部表格读取完成: 共{len(all_data)}张表, {total_rows}条记录 ({table_summary})")
+            
+            return {"tables": all_data, "table_count": len(all_data), "total_rows": total_rows}
+            
+        except Exception as e:
+            raise Exception(f"读取多维表格失败: {str(e)}")
     
     def _get_tenant_access_token(self) -> str:
         token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -196,31 +276,91 @@ class FeishuClient:
         revision_id = resp_json["data"]["document"]["revision_id"]
         print(f"[INFO] 文档创建成功, document_id={document_id}")
         
-        # 步骤2：添加内容块
+        # 步骤2：添加内容块，分批写入避免长度超限
         blocks_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children"
-        blocks_body = {
-            "children": [],
-            "index": 0,
-            "location": "start"
+        
+        # 飞书docx API block_type映射：
+        # 1=页面(不可作为子块创建), 2=文本, 3=标题1, 4=标题2, 5=标题3, 6=标题4
+        HEADING_TYPE_MAP = {
+            1: (3, "heading1"),   # # 一级标题 → block_type=3, field=heading1
+            2: (4, "heading2"),   # ## 二级标题 → block_type=4, field=heading2
+            3: (5, "heading3"),   # ### 三级标题 → block_type=5, field=heading3
+            4: (6, "heading4"),   # #### 四级标题 → block_type=6, field=heading4
         }
         
         # 把内容按段落分割成文本块
         lines = content.strip().split("\n")
+        all_blocks = []
         for line in lines:
-            if line.strip():
+            line = line.strip()
+            if not line:
+                continue
+            
+            # 检测标题级别（统计开头的#个数）
+            heading_level = 0
+            for ch in line:
+                if ch == '#':
+                    heading_level += 1
+                else:
+                    break
+            
+            if heading_level >= 1 and heading_level <= 4 and line[heading_level:heading_level+1] == ' ':
+                # 标题块
+                content_text = line[heading_level+1:].strip()
+                bt, field_name = HEADING_TYPE_MAP.get(heading_level, (2, "text"))
                 block = {
-                    "block_type": 2,  # 2 = 文本
+                    "block_type": bt,
+                    field_name: {
+                        "elements": [{"text_run": {"content": content_text}}],
+                        "style": {}
+                    }
+                }
+                all_blocks.append(block)
+            elif line.startswith("|") and line.endswith("|"):
+                # 表格行作为普通文本处理
+                block = {
+                    "block_type": 2,
                     "text": {
                         "elements": [{"text_run": {"content": line}}],
                         "style": {}
                     }
                 }
-                blocks_body["children"].append(block)
+                all_blocks.append(block)
+            elif line.startswith("---") or line.startswith("***"):
+                # 分隔线，跳过或作为文本
+                continue
+            else:
+                # 普通文本块
+                block = {
+                    "block_type": 2,
+                    "text": {
+                        "elements": [{"text_run": {"content": line}}],
+                        "style": {}
+                    }
+                }
+                all_blocks.append(block)
         
-        if blocks_body["children"]:
-            resp = requests.post(blocks_url, headers=headers, json=blocks_body, timeout=30)
+        # 分批写入，每批最多50个块，避免接口超限
+        batch_size = 50
+        total_batches = (len(all_blocks) + batch_size - 1) // batch_size
+        success_count = 0
+        for batch_idx in range(total_batches):
+            i = batch_idx * batch_size
+            batch_blocks = all_blocks[i:i+batch_size]
+            blocks_body = {
+                "children": batch_blocks,
+                "index": 0,
+            }
+            resp = requests.post(blocks_url, headers=headers, json=blocks_body, timeout=60)
             resp_json = resp.json()
-            if resp_json.get("code") != 0:
-                print(f"[WARN] 添加文档内容失败: {resp_json.get('msg')}, 文档已创建但内容为空")
+            resp_code = resp_json.get("code", -1)
+            if resp_code == 0:
+                success_count += 1
+            else:
+                print(f"[WARN] 第{batch_idx + 1}批内容写入失败: code={resp_code}, msg={resp_json.get('msg')}")
+                # 打印第一个失败块的详细信息用于调试
+                if batch_blocks:
+                    print(f"[DEBUG] 失败批次首个块: block_type={batch_blocks[0].get('block_type')}, keys={list(batch_blocks[0].keys())}")
         
+        print(f"[INFO] 文档内容写入完成: {success_count}/{total_batches} 批次成功, 共{len(all_blocks)}个块")
         return f"https://feishu.cn/docx/{document_id}"
