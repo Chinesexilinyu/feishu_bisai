@@ -30,12 +30,88 @@ class DocAgent(BaseAgent):
             pass
         return status
 
-    def call_data_agent(self, token: str, resource: str = "feishu:bitable", action: str = "read") -> dict:
+    def initiate_task(self, delegated_user: dict, need_data: bool = True, need_web: bool = False, keyword: str = None) -> dict:
+        """初始化任务，生成Trace ID并记录审计日志，返回任务状态和错误信息
+        调用方（交互模式/API）应在调用generate_novel_analysis_report前先调用此方法，
+        以确保所有场景（包括Agent未启动）都有Trace ID和审计日志可追溯
+        """
+        trace_id = self.trace_manager.new_trace()
+        self.trace_manager.set_trace_id(trace_id)
+
+        # 记录任务启动审计日志
+        self.audit_logger.log_authorization_event(
+            event_type="TASK_INITIATED",
+            decision="ALLOW",
+            subject={"agent_id": self.agent_id, "agent_name": "飞书文档助手Agent"},
+            resource={"type": "doc:report:generate", "action": "create"},
+            authorization={
+                "requested_capability": "doc:report:generate",
+                "effective_permissions": ["doc:report:generate"],
+                "reason": "TASK_INITIATED",
+                "need_data_agent": need_data,
+                "need_web_agent": need_web,
+                "keyword": keyword
+            },
+            trace_id=trace_id,
+            delegation_context={"delegated_user": delegated_user}
+        )
+
+        # 预检Agent健康状态
+        health = self.check_agent_health()
+        error = None
+
+        if need_data and not health["data_agent"]:
+            error = "企业数据Agent(8002)未启动，无法读取多维表格数据"
+            self.audit_logger.log_authorization_event(
+                event_type="AGENT_UNAVAILABLE",
+                decision="DENY",
+                subject={"agent_id": self.agent_id, "agent_name": "飞书文档助手Agent"},
+                resource={"type": "feishu:bitable", "action": "read"},
+                authorization={
+                    "requested_capability": "feishu:bitable:read",
+                    "effective_permissions": [],
+                    "reason": "AGENT_UNAVAILABLE: data_agent(8002) not running"
+                },
+                trace_id=trace_id,
+                delegation_context={"delegated_user": delegated_user}
+            )
+
+        if need_web and not health["web_agent"]:
+            if error:
+                error += "；外部检索Agent(8003)也未启动"
+            else:
+                error = "外部检索Agent(8003)未启动，无法搜索外部信息"
+            self.audit_logger.log_authorization_event(
+                event_type="AGENT_UNAVAILABLE",
+                decision="DENY",
+                subject={"agent_id": self.agent_id, "agent_name": "飞书文档助手Agent"},
+                resource={"type": "web:search", "action": "search"},
+                authorization={
+                    "requested_capability": "web:search",
+                    "effective_permissions": [],
+                    "reason": "AGENT_UNAVAILABLE: web_agent(8003) not running"
+                },
+                trace_id=trace_id,
+                delegation_context={"delegated_user": delegated_user}
+            )
+
+        return {
+            "trace_id": trace_id,
+            "can_proceed": error is None or (need_web and not health["web_agent"] and not error.startswith("企业数据Agent")),
+            "health": health,
+            "error": error
+        }
+
+    def call_data_agent(self, token: str, resource: str = "feishu:bitable", action: str = "read", trace_id: str = None) -> dict:
         """通过HTTP委托DataAgent读取企业内部数据"""
+        headers = {}
+        if trace_id:
+            headers["X-Trace-ID"] = trace_id
         try:
             resp = requests.post(
                 self.data_agent_url,
                 json={"token": token, "resource": resource, "action": action},
+                headers=headers,
                 timeout=60
             )
             if resp.status_code != 200:
@@ -75,11 +151,31 @@ class DocAgent(BaseAgent):
             return {"success": False, "error": str(e), "code": 500}
 
     def generate_novel_analysis_report(self, delegated_user: dict, keyword: str = None,
-                                        need_web_search: bool = False) -> dict:
+                                        need_web_search: bool = False, trace_id: str = None) -> dict:
         """生成番茄小说数据分析报告 - 通过HTTP委托DataAgent和WebAgent
         严格权限控制：调用WebAgent前必须通过健康检查确认其在线"""
-        trace_id = self.trace_manager.new_trace()
-        self.trace_manager.set_trace_id(trace_id)
+        if trace_id:
+            self.trace_manager.set_trace_id(trace_id)
+        else:
+            trace_id = self.trace_manager.new_trace()
+            self.trace_manager.set_trace_id(trace_id)
+
+        # 记录任务启动审计日志
+        self.audit_logger.log_authorization_event(
+            event_type="TASK_EXECUTION",
+            decision="ALLOW",
+            subject={"agent_id": self.agent_id, "agent_name": "飞书文档助手Agent"},
+            resource={"type": "doc:report:generate", "action": "create"},
+            authorization={
+                "requested_capability": "doc:report:generate",
+                "effective_permissions": ["doc:report:generate"],
+                "reason": "TASK_STARTED",
+                "need_web_search": need_web_search,
+                "keyword": keyword
+            },
+            trace_id=trace_id,
+            delegation_context={"delegated_user": delegated_user}
+        )
 
         try:
             token, _ = self.get_identity_token(delegated_user=delegated_user, expires_in=7200)
@@ -105,7 +201,7 @@ class DocAgent(BaseAgent):
                         print(f"[DocAgent] WARN: 外部检索请求失败: {web_result.get('error')}")
                         web_result = None
 
-            internal_result = self.call_data_agent(token=token)
+            internal_result = self.call_data_agent(token=token, trace_id=trace_id)
             if not internal_result["success"]:
                 return {
                     "success": False,
@@ -231,6 +327,24 @@ class DocAgent(BaseAgent):
             final_report = llm_report + "\n\n---\n\n## 附录：原始数据\n\n" + raw_data_content
 
             doc_url = feishu_create_doc(title="番茄小说数据分析报告", content=final_report)
+            
+            # 记录任务成功审计日志
+            self.audit_logger.log_authorization_event(
+                event_type="TASK_COMPLETED",
+                decision="ALLOW",
+                subject={"agent_id": self.agent_id, "agent_name": "飞书文档助手Agent"},
+                resource={"type": "doc:report:generate", "action": "create"},
+                authorization={
+                    "requested_capability": "doc:report:generate",
+                    "effective_permissions": ["doc:report:generate"],
+                    "reason": "TASK_SUCCEEDED",
+                    "doc_url": doc_url,
+                    "data_rows": internal_result["data"].get("total_rows", 0),
+                    "web_search_success": web_result is not None and web_result.get("success", False)
+                },
+                trace_id=trace_id,
+                delegation_context={"delegated_user": delegated_user}
+            )
 
             return {
                 "success": True,
@@ -244,6 +358,20 @@ class DocAgent(BaseAgent):
                 "trace_id": trace_id
             }
         except Exception as e:
+            # 记录任务失败审计日志
+            self.audit_logger.log_authorization_event(
+                event_type="TASK_FAILED",
+                decision="DENY",
+                subject={"agent_id": self.agent_id, "agent_name": "飞书文档助手Agent"},
+                resource={"type": "doc:report:generate", "action": "create"},
+                authorization={
+                    "requested_capability": "doc:report:generate",
+                    "effective_permissions": ["doc:report:generate"],
+                    "reason": f"TASK_FAILED: {str(e)}"
+                },
+                trace_id=trace_id,
+                delegation_context={"delegated_user": delegated_user}
+            )
             return {
                 "success": False,
                 "error": str(e),

@@ -15,10 +15,24 @@ import json
 app = FastAPI(title="企业数据Agent服务", version="3.0.0")
 data_agent = DataAgent()
 
+from typing import Dict, Any
+
 class HandleRequest(BaseModel):
     token: str
     resource: str
     action: str
+
+class TaskRequestModel(BaseModel):
+    task_id: str
+    task_type: str
+    intent: str
+    parameters: Dict[str, Any]
+    parent_task_id: str = None
+    trace_id: str = None
+    context: Dict[str, Any] = None
+    created_at: int = None
+    timeout: int = 300
+    status: str = "pending"
 
 @app.get("/health")
 async def health():
@@ -29,13 +43,28 @@ async def health():
         "features": ["feishu:bitable:read", "feishu:bitable:write", "feishu:contact:read"]
     }
 
-@app.post("/handle-request", summary="处理数据访问请求")
-async def handle_request(request: HandleRequest):
+@app.post("/handle-request", summary="处理数据访问请求（兼容旧接口）")
+async def handle_request(request: HandleRequest, x_trace_id: str = None):
     result = data_agent.handle_request(
         token=request.token,
         resource=request.resource,
-        action=request.action
+        action=request.action,
+        trace_id=x_trace_id
     )
+    return result
+
+@app.post("/api/v1/task", summary="处理标准化任务请求（新协议）")
+async def handle_task(task: TaskRequestModel, authorization: str = None):
+    if not authorization or not authorization.startswith("Bearer "):
+        return {
+            "code": "40102",
+            "message": "Invalid authorization header",
+            "task_id": task.task_id,
+            "status": "rejected",
+            "trace_id": task.trace_id
+        }
+    token = authorization.split(" ")[1]
+    result = data_agent.handle_task(token=token, task_dict=task.dict())
     return result
 
 

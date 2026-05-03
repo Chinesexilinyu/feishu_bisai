@@ -45,14 +45,29 @@ async def health():
 
 @app.post("/generate-report")
 async def generate_report(request: GenerateReportRequest):
+    delegate_user = {
+        "user_id": request.user_id,
+        "user_name": request.user_name,
+        "user_role": request.user_role
+    }
+    init_result = doc_agent.initiate_task(
+        delegated_user=delegate_user,
+        need_data=True,
+        need_web=request.need_web_search,
+        keyword=request.keyword
+    )
+    if not init_result["can_proceed"]:
+        return {
+            "success": False,
+            "error": init_result["error"],
+            "code": 503,
+            "trace_id": init_result["trace_id"]
+        }
     result = doc_agent.generate_novel_analysis_report(
-        delegated_user={
-            "user_id": request.user_id,
-            "user_name": request.user_name,
-            "user_role": request.user_role
-        },
+        delegated_user=delegate_user,
         keyword=request.keyword,
-        need_web_search=request.need_web_search
+        need_web_search=request.need_web_search,
+        trace_id=init_result["trace_id"]
     )
     return result
 
@@ -60,8 +75,32 @@ async def generate_report(request: GenerateReportRequest):
 async def nl_execute(request: NLInstructionRequest):
     intent = intent_recognizer.analyze(request.instruction)
     if intent["task_type"] == "generate_report":
+        need_data = intent["call_data_agent"]["decision"] == "yes"
         call_web = intent["call_web_agent"]["decision"] == "yes"
         keyword = intent["call_web_agent"].get("keyword")
+        
+        # 预检Agent健康状态，生成Trace ID并记录审计日志
+        init_result = doc_agent.initiate_task(
+            delegated_user={
+                "user_id": request.user_id,
+                "user_name": request.user_name,
+                "user_role": request.user_role
+            },
+            need_data=need_data,
+            need_web=call_web,
+            keyword=keyword
+        )
+        
+        if not init_result["can_proceed"]:
+            return {
+                "success": False,
+                "error": init_result["error"],
+                "code": 503,
+                "trace_id": init_result["trace_id"],
+                "intent": intent,
+                "instruction": request.instruction
+            }
+        
         result = doc_agent.generate_novel_analysis_report(
             delegated_user={
                 "user_id": request.user_id,
@@ -69,7 +108,8 @@ async def nl_execute(request: NLInstructionRequest):
                 "user_role": request.user_role
             },
             keyword=keyword,
-            need_web_search=call_web
+            need_web_search=call_web,
+            trace_id=init_result["trace_id"]
         )
         return {"intent": intent, **result, "instruction": request.instruction}
     return {"success": False, "error": "不支持的指令类型", "intent": intent, "code": 400}
@@ -144,11 +184,20 @@ def interactive_mode():
         if not need_web:
             print("[DocAgent] LLM判断不需要外部检索")
 
-        # ---- 严格权限控制：调用前预检健康状态 ----
-        health = doc_agent.check_agent_health()
+        # ---- 严格权限控制：调用前预检健康状态（通过initiate_task统一入口，确保Trace ID和审计日志正确生成） ----
+        init_result = doc_agent.initiate_task(
+            delegated_user=user_info,
+            need_data=need_data,
+            need_web=need_web,
+            keyword=keyword
+        )
+        task_trace_id = init_result["trace_id"]
+        health = init_result["health"]
+        
         if need_data and not health["data_agent"]:
             print("[DocAgent] 企业数据Agent未启动！请先运行:")
             print("          python run_data_agent.py --server")
+            print("[DocAgent] Trace ID: {} (请使用此ID查询审计日志)".format(task_trace_id))
             continue
         if need_web and not health["web_agent"]:
             print("[DocAgent] 外部检索Agent未启动！无法执行外部检索。")
@@ -166,7 +215,8 @@ def interactive_mode():
         result = doc_agent.generate_novel_analysis_report(
             delegated_user=user_info,
             keyword=keyword,
-            need_web_search=need_web
+            need_web_search=need_web,
+            trace_id=task_trace_id
         )
 
         print("\n[DocAgent] 执行完成！")

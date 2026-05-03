@@ -2,10 +2,37 @@ import time
 import jwt
 import uuid
 from .key_manager import KeyManager
+import os
+import json
 
 class TokenIssuer:
     def __init__(self, key_manager: KeyManager = None):
         self.key_manager = key_manager or KeyManager()
+        self.revoked_tokens_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "revoked_tokens.json"
+        )
+        self._load_revoked_tokens()
+    
+    def _load_revoked_tokens(self):
+        if os.path.exists(self.revoked_tokens_path):
+            with open(self.revoked_tokens_path, 'r', encoding='utf-8') as f:
+                self.revoked_tokens = set(json.load(f))
+        else:
+            self.revoked_tokens = set()
+    
+    def _save_revoked_tokens(self):
+        with open(self.revoked_tokens_path, 'w', encoding='utf-8') as f:
+            json.dump(list(self.revoked_tokens), f)
+    
+    def revoke_token(self, jti: str):
+        """吊销Token"""
+        self.revoked_tokens.add(jti)
+        self._save_revoked_tokens()
+    
+    def is_token_revoked(self, jti: str) -> bool:
+        """检查Token是否被吊销"""
+        return jti in self.revoked_tokens
 
     def issue_token(
         self,

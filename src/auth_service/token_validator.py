@@ -1,10 +1,12 @@
 import jwt
 import time
 from .key_manager import KeyManager
+from .token_issuer import TokenIssuer
 
 class TokenValidator:
     def __init__(self, key_manager: KeyManager = None):
         self.key_manager = key_manager or KeyManager()
+        self.token_issuer = TokenIssuer()
 
     def verify_token(self, token: str) -> dict:
         try:
@@ -16,6 +18,11 @@ class TokenValidator:
                 leeway=60,  # 允许60秒的时钟偏差
                 audience="agent-service"
             )
+            
+            # 检查Token是否被吊销
+            if self.token_issuer.is_token_revoked(payload["jti"]):
+                return {"valid": False, "payload": None, "error": "TOKEN_REVOKED"}
+            
             return {
                 "valid": True,
                 "payload": payload,
